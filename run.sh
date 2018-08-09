@@ -1,0 +1,1 @@
+python3 train.py --data REDDIT --emsize 300 --hidden 500 --nlayers 1 --lr 0.0003 --clip 0.5  --epochs 6 --drop 0.6 --batch_size 64 --model CNN --bi --save_dir saved_models --model_name chunk10.cnn.unkified #--demote_topics
