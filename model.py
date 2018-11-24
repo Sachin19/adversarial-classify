@@ -73,7 +73,7 @@ class Classifier(nn.Module):
     print('Total param size: {}'.format(size))
 
 
-  def forward(self, input, alpha=1.0):
+  def forward(self, input, alpha=1.0, gradreverse=True):
     outputs, hidden = self.encoder(self.embedding(input))
     if isinstance(hidden, tuple): # LSTM
       hidden = hidden[1] # take the cell state
@@ -118,14 +118,14 @@ class CNN_Text(nn.Module):
       '''
       self.dropout = nn.Dropout(args.drop)
       self.fc1 = nn.Linear(len(Ks)*Co, C)
-      self.topic_decoder = nn.Sequential(nn.Linear(len(Ks)*Co, num_topics), nn.LogSoftmax())
+      self.topic_decoder = nn.Sequential(nn.Linear(len(Ks)*Co, num_topics), nn.LogSoftmax(dim=-1))
 
   def conv_and_pool(self, x, conv):
       x = F.relu(conv(x)).squeeze(3)  # (N, Co, W)
       x = F.max_pool1d(x, x.size(2)).squeeze(2)
       return x
 
-  def forward(self, x, alpha=1.0):
+  def forward(self, x, gradreverse=True, alpha=1.0):
       x = x.permute(1, 0)
       x = self.embed(x)  # (N, W, D)
 
@@ -147,6 +147,57 @@ class CNN_Text(nn.Module):
       '''
       x = self.dropout(x)  # (N, len(Ks)*Co)
       logit = self.fc1(x)  # (N, C)
-      reverse_x = ReverseLayerF.apply(x, alpha)
-      topic_logprobs = self.topic_decoder(reverse_x)
+      if gradreverse:
+        reverse_x = ReverseLayerF.apply(x, alpha)
+        topic_logprobs = self.topic_decoder(reverse_x)
+      else:
+        topic_logprobs = self.topic_decoder(x)
       return logit, None, topic_logprobs
+
+class FFN_BOW_Text(nn.Module):
+
+  def __init__(self, args):
+      super(FFN_BOW_Text, self).__init__()
+      self.args = args
+
+      V = args.embed_num
+      D = args.embed_dim
+      C = args.nlabels
+
+      self.embed = nn.Embedding(V, C)
+
+      self.fc1 = nn.Linear(D, C)
+      self.topic_decoder = nn.Sequential(nn.Linear(D, args.num_topics), nn.LogSoftmax(dim=-1))
+
+  def forward(self, x, gradreverse=True, alpha=1.0):
+      x = x.permute(1, 0)
+      x = self.embed(x)  # (N, W, D)
+      x = x.sum(dim=1) # (N, D)
+      x = Variable(x)
+
+      logit = self.fc1(x)  # (N, C)
+      if gradreverse:
+        reverse_x = ReverseLayerF.apply(x, alpha)
+        topic_logprobs = self.topic_decoder(reverse_x)
+      else:
+        topic_logprobs = self.topic_decoder(x)
+      return logit, None, topic_logprobs
+
+class FFN_Text(nn.Module):
+
+  def __init__(self, args):
+      super(FFN_Text, self).__init__()
+      self.args = args
+      C = args.nlabels
+      num_topics = args.num_topics
+
+      self.mlp1 = nn.Linear(num_topics, C)
+      self.mlp2 = nn.LogSoftmax(dim=-1)
+
+
+  def forward(self, x, gradreverse=True, alpha=1.0):
+      x1 = self.mlp1(x)
+      # x2 = F.relu(x1)
+      logit = self.mlp2(x1)  # (N, C)
+      return logit, None, logit
+

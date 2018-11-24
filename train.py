@@ -14,32 +14,52 @@ def make_parser():
   parser = argparse.ArgumentParser(description='PyTorch RNN Classifier w/ attention')
   parser.add_argument('--data', type=str, default='SST',
                         help='Data corpus: [SST, TREC, IMDB, REDDIT]')
+  parser.add_argument('--base_path', type=str, required=True,
+                      help='path of base folder')
+  parser.add_argument('--suffix', type=str, default="",
+                      help='suffix like _10, _5, _2 or empty string')
+  parser.add_argument('--extrasuffix', type=str, default="",
+                      help='suffix like _10, _5, _2 or empty string')
   parser.add_argument('--rnn_model', type=str, default='LSTM',
                         help='type of recurrent net [LSTM, GRU]')
   parser.add_argument('--save_dir', type=str,
                         help='Directory to save the model')
   parser.add_argument('--model', type=str,
-                        help='CNN or RNN')
+                        help='CNN or RNN or FFN (uses topics as features)')
   parser.add_argument('--model_name', type=str,
                         help='Model name to save')
+  parser.add_argument('--topic_loss', type=str, default="ce",
+                        help='in [mse|ce]')
   parser.add_argument('--emsize', type=int, default=300,
                         help='size of word embeddings [Uses pretrained on 50, 100, 200, 300]')
   parser.add_argument('--hidden', type=int, default=500,
                         help='number of hidden units for the RNN encoder')
   parser.add_argument('--nlayers', type=int, default=2,
                         help='number of layers of the RNN encoder')
+  parser.add_argument('--num_topics', type=int, default=50,
+                        help='Number of Topics')
   parser.add_argument('--lr', type=float, default=1e-3,
                         help='initial learning rate')
   parser.add_argument('--clip', type=float, default=5,
                         help='gradient clipping')
-  parser.add_argument('--epochs', type=int, default=10,
+  parser.add_argument('--epochs', type=int, default=5,
                         help='upper epoch limit')
-  parser.add_argument('--batch_size', type=int, default=32, metavar='N',
+  parser.add_argument('--gpu', type=int, default=0,
+                        help='which gpu to use')
+  parser.add_argument('--alpha', type=float, default=0.1,
+                        help='coefficient for reverse gradient')
+  parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size')
   parser.add_argument('--drop', type=float, default=0,
                         help='dropout')
+  parser.add_argument('--gradreverse', action='store_false',
+                        help='Reverse Gradients if not set')
   parser.add_argument('--bi', action='store_true',
                         help='[USE] bidirectional encoder')
+  parser.add_argument('--save_output_topics', action='store_true',
+                        help='save output topics in file')
+  parser.add_argument('--output_topics_save_filename', type=str,
+                        help='where to save output topics')
   parser.add_argument('--cuda', action='store_false',
                     help='[DONT] use CUDA')
   parser.add_argument('--load', action='store_true',
@@ -54,6 +74,8 @@ def make_parser():
 
   return parser
 
+
+topic_criterion = nn.KLDivLoss(size_average=False)
 
 def seed_everything(seed, cuda=False):
   # Set the random seed manually for reproducibility.
@@ -73,31 +95,51 @@ def update_stats(accuracy, confusion_matrix, logits, y):
 
   return accuracy + correct, confusion_matrix
 
+def update_stats_topics(accuracy, confusion_matrix, logits, y):
+  _, max_ind = torch.max(logits, 1)
+  _, max_ind_y = torch.max(y, 1)
+  equal = torch.eq(max_ind, max_ind_y)
+  correct = int(torch.sum(equal))
+
+  for j, i in zip(max_ind, max_ind_y):
+    confusion_matrix[int(i),int(j)]+=1
+
+  return accuracy + correct, confusion_matrix
+
 
 def train(model, data, optimizer, criterion, args):
   model.train()
   accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
+  accuracy_fromtopics, confusion_matrix_ = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
   t = time.time()
   total_loss = 0
   total_topic_loss = 0
   for batch_num, batch in enumerate(data):
     model.zero_grad()
-    # print (batch.fields)
-    # input()
     x, lens = batch.text
     y = batch.label
     topics = batch.topics
-    # print (topics.size())
-    logits, _, topic_logprobs = model(x)
+    if args.model == "FFN":
+      logits, _, topic_logprobs = model(topics)
+    else:
+      logits, _, topic_logprobs = model(x, gradreverse=args.gradreverse, alpha=args.alpha)
+
     loss = criterion(logits.view(-1, args.nlabels), y)
     total_loss += float(loss)
 
     if args.demote_topics:
-      topic_loss = -(topic_logprobs * topics).sum(dim=-1).mean()
+      if args.topic_loss == "ce":
+        # g = topic_logprobs * topics
+        # topic_loss = -g.sum(dim=-1).mean()
+        topic_loss = topic_criterion(topic_logprobs, topics)
+      else:
+        g = (topics - torch.exp(topic_logprobs))
+        topic_loss = (g*g).sum(dim=-1).mean()
       loss += topic_loss
       total_topic_loss += float(topic_loss)
 
     accuracy, confusion_matrix = update_stats(accuracy, confusion_matrix, logits, y)
+    accuracy_fromtopics, confusion_matrix_ = update_stats_topics(accuracy_fromtopics, confusion_matrix_, topic_logprobs, topics)
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
     optimizer.step()
@@ -111,31 +153,53 @@ def train(model, data, optimizer, criterion, args):
   print("[Loss]: {:.5f}".format(total_loss / len(data)))
   print("[Accuracy]: {}/{} : {:.3f}%".format(
         accuracy, len(data.dataset), accuracy / len(data.dataset) * 100))
+  print("[accuracy_fromtopics]: {}/{} : {:.3f}%".format(
+        accuracy_fromtopics, len(data.dataset), accuracy_fromtopics / len(data.dataset) * 100))
   print(confusion_matrix)
   return total_loss / len(data)
 
 
-def evaluate(model, data, optimizer, criterion, args, type='Valid'):
+def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetopics=False):
   model.eval()
+  if writetopics:
+    topicfile = open(args.save_dir+"/"+datatype+"_"+args.output_topics_save_filename+".txt","w")
   accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
   t = time.time()
   total_loss = 0
+  total_topic_loss = 0
   with torch.no_grad():
     for batch_num, batch in enumerate(data):
       # print (len(batch.text))
       x, lens = batch.text
       y = batch.label
+      # topics = batch.topics
 
-      logits, _, topic_logits = model(x)
+      if args.model == "FFN":
+        logits, _, _ = model(topics)
+      else:
+        logits, _, topic_logprobs = model(x, gradreverse=args.gradreverse)
+
+      # if args.demote_topics:
+      #   topics = batch.topics
+      #   topic_loss = -(topic_logprobs * topics).sum(dim=-1).mean()
+      #   # loss = topic_loss
+      #   total_topic_loss += float(topic_loss)
+
+      if writetopics:
+        for topiclogprob in topic_logprobs.cpu().data.numpy():
+          topicfile.write(" ".join([str(np.exp(t)) for t in topiclogprob])+"\n")
       total_loss += float(criterion(logits.view(-1, args.nlabels), y))
       accuracy, confusion_matrix = update_stats(accuracy, confusion_matrix, logits, y)
       print("[Batch]: {}/{} in {:.5f} seconds".format(
             batch_num, len(data), time.time() - t), end='\r', flush=True)
       t = time.time()
+  if writetopics:
+    topicfile.close()
 
   print()
-  print("[{} loss]: {:.5f}".format(type, total_loss / len(data)))
-  print("[{} accuracy]: {}/{} : {:.3f}%".format(type,
+  # print("[{} topic loss]: {:.5f}".format(total_topic_loss / len(data)))
+  print("[{} loss]: {:.5f}".format(datatype, total_loss / len(data)))
+  print("[{} accuracy]: {}/{} : {:.3f}%".format(datatype,
         accuracy, len(data.dataset), accuracy / len(data.dataset) * 100))
   print(confusion_matrix)
   return total_loss / len(data)
@@ -156,13 +220,13 @@ def main():
   print("[Model hyperparams]: {}".format(str(args)))
 
   cuda = torch.cuda.is_available() and args.cuda
-  device = torch.device("cpu") if not cuda else torch.device("cuda:0")
+  device = torch.device("cpu") if not cuda else torch.device("cuda:"+str(args.gpu))
   seed_everything(seed=1337, cuda=cuda)
   vectors = None #don't use pretrained vectors
   # vectors = load_pretrained_vectors(args.emsize)
 
   # Load dataset iterators
-  iters, TEXT, LABEL, TOPICS = dataset_map[args.data](args.batch_size, device=device, vectors=vectors)
+  iters, TEXT, LABEL, TOPICS = dataset_map[args.data](args.batch_size, device=device, vectors=vectors, base_path=args.base_path, suffix=args.suffix, extrasuffix=args.extrasuffix)
 
   # Some datasets just have the train & test sets, so we just pretend test is valid
   if len(iters) == 4:
@@ -182,7 +246,19 @@ def main():
     args.kernel_sizes = [int(k) for k in args.kernel_sizes.split(',')]
     args.embed_dim = args.emsize
 
-    model = CNN_Text(args)
+    model = CNN_Text(args, num_topics=args.num_topics)
+
+  elif args.model == "FFN_BOW":
+    args.embed_num = len(TEXT.vocab)
+    args.nlabels = len(LABEL.vocab)
+    args.embed_dim = args.emsize
+
+    model = FFN_BOW_Text(args)
+
+  elif args.model == "FFN":
+    args.nlabels = len(LABEL.vocab)
+    model = FFN_Text(args)
+
   else:
     ntokens, nlabels = len(TEXT.vocab), len(LABEL.vocab)
     args.nlabels = nlabels # hack to not clutter function arguments
@@ -195,11 +271,17 @@ def main():
     attention_dim = args.hidden if not args.bi else 2*args.hidden
     attention = Attention(attention_dim, attention_dim, attention_dim)
 
-    model = Classifier(embedding, encoder, attention, attention_dim, nlabels)
+    model = Classifier(embedding, encoder, attention, attention_dim, nlabels, num_topics=args.num_topics)
   model.to(device)
 
   criterion = nn.CrossEntropyLoss()
+  topic_criterion = nn.KLDivLoss(size_average=False)
   optimizer = torch.optim.Adam(model.parameters(), args.lr, amsgrad=True)
+
+  for p in model.parameters():
+    if not p.requires_grad:
+      print ("OMG", p)
+      p.requires_grad = True
 
   if args.load:
     best_model = torch.load(args.save_dir+"/"+args.model_name+"_bestmodel")
@@ -216,12 +298,13 @@ def main():
           print ("Updating best model")
           best_model = copy.deepcopy(model)
           torch.save(best_model, args.save_dir+"/"+args.model_name+"_bestmodel")
-
-
     except KeyboardInterrupt:
       print("[Ctrl+C] Training stopped!")
-  loss = evaluate(best_model, test_iter, optimizer, criterion, args, type='Test')
-  odLoss = evaluate(best_model, outdomain_test_iter, optimizer, criterion, args, type="OutofDomainTest")
+
+  trainloss = evaluate(best_model, train_iter, optimizer, criterion, args, datatype='train', writetopics=args.save_output_topics)
+  valloss = evaluate(best_model, val_iter, optimizer, criterion, args, datatype='valid', writetopics=args.save_output_topics)
+  loss = evaluate(best_model, test_iter, optimizer, criterion, args, datatype='test', writetopics=args.save_output_topics)
+  odLoss = evaluate(best_model, outdomain_test_iter, optimizer, criterion, args, datatype="oodtest", writetopics=args.save_output_topics)
 
 if __name__ == '__main__':
   main()
