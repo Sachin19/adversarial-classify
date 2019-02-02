@@ -8,6 +8,8 @@ parser.add_argument('--base_path', type=str, required=True,
                       help='path of base folder')
 parser.add_argument('--suffix', type=str, default="",
                       help='suffix like _10, _5, _2 or empty string')
+parser.add_argument('--extra_suffix', type=str, default="",
+                      help='suffix like .logoddstop50r empty string')
 parser.add_argument('--char', action='store_true')
 parser.add_argument('--lex', action='store_true')
 parser.add_argument('--brown', action='store_true')
@@ -17,14 +19,16 @@ parser.add_argument('--train_prob_path', type=str, help='path of file to write o
 parser.add_argument('--dev_prob_path', type=str, help='path of file to write output probabilites for valid set')
 parser.add_argument('--test_prob_path', type=str, help='path of file to write output probabilites for test set')
 
+parser.add_argument("--save_model")
+
 args = parser.parse_args()
 
 base_path = args.base_path
-ftrain = open(base_path+"/train"+args.suffix+".txt")
-fdev = open(base_path+"/valid"+args.suffix+".txt")
-ftest = open(base_path+"/test"+args.suffix+".txt")
-fouttest = open(base_path+"/oodtest"+args.suffix+".txt")
-brownc = pickle.load(open(base_path+"/brown_cluster.pkl","rb"))
+ftrain = open(base_path+"/train"+args.suffix+args.extra_suffix+".txt")
+fdev = open(base_path+"/valid"+args.suffix+args.extra_suffix+".txt")
+ftest = open(base_path+"/test"+args.suffix+args.extra_suffix+".txt")
+fouttest = open(base_path+"/oodtest"+args.suffix+args.extra_suffix+".txt")
+brownc = pickle.load(open(base_path+"/brownclusters"+args.suffix+".pkl","rb"))
 
 texts = []
 trainY = []
@@ -200,6 +204,11 @@ if args.output_proba:
 from sklearn.linear_model import LogisticRegression
 lr = LogisticRegression()
 lr.fit(trainX, trainY)
+
+if args.save_model != "":
+  print ("Saving the baseline model")
+  with open(args.save_model,"wb") as f:
+    pickle.dump(lr, f)
 
 predY = lr.predict(testX)
 

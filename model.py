@@ -58,9 +58,45 @@ class Attention(nn.Module):
     linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
     return energy, linear_combination
 
+class BahdanauAttention(nn.Module):
+  def __init__(self, hidden_dim, attn_dim):
+    super(BahdanauAttention, self).__init__()
+    self.linear = nn.Linear(hidden_dim, attn_dim)
+    self.linear2 = nn.Linear(attn_dim, 1)
+
+  def forward(self, hidden, mask=None):
+    # hidden = [TxBxH]
+    # mask = [TxB]
+    # Outputs = a:[TxB], lin_comb:[BxV]
+
+    # print (hidden.size())
+    # Here we assume q_dim == k_dim (dot product attention)
+    hidden = hidden.transpose(0,1) # [TxBxH] -> [BxTxH]
+    energy = self.linear(hidden) # [BxTxH] -> [BxTxA]
+    energy = F.tanh(energy)
+    energy = self.linear2(energy) # [BxTxA] -> [BxTx1]
+    energy = F.softmax(energy, dim=1) # scale, normalize
+
+    # print (energy.size())
+    if mask is not None:
+      mask = mask.transpose(0, 1).unsqueeze(2)
+      # print (mask.size())
+      energy = energy * mask
+      # print (energy.size())
+      Z = energy.sum(dim=1, keepdim=True) #[BxTx1] -> [Bx1x1]
+      # print (Z.size())
+      # input()
+      energy = energy/Z #renormalize
+
+    energy = energy.transpose(1, 2) # [BxTx1] -> [Bx1xT]
+    # hidden = hidden.transpose(0,1) # [TxBxH] -> [BxTxH]
+    linear_combination = torch.bmm(energy, hidden).squeeze(1) #[Bx1xT]x[BxTxH] -> [BxH]
+    return energy, linear_combination
+
 class Classifier(nn.Module):
-  def __init__(self, embedding, encoder, attention, hidden_dim, num_classes, num_topics=50):
+  def __init__(self, embedding, encoder, attention, hidden_dim, num_classes=10, num_topics=50):
     super(Classifier, self).__init__()
+    # num_classes=2
     self.embedding = embedding
     self.encoder = encoder
     self.attention = attention
@@ -72,8 +108,7 @@ class Classifier(nn.Module):
       size += p.nelement()
     print('Total param size: {}'.format(size))
 
-
-  def forward(self, input, alpha=1.0, gradreverse=True):
+  def forward(self, input, alpha=1.0, gradreverse=True, padding_mask=None):
     outputs, hidden = self.encoder(self.embedding(input))
     if isinstance(hidden, tuple): # LSTM
       hidden = hidden[1] # take the cell state
@@ -88,7 +123,7 @@ class Classifier(nn.Module):
     # linear_combination, _ = torch.max(outputs, 0)
     # linear_combination = torch.mean(outputs, 0)
 
-    energy, linear_combination = self.attention(hidden, outputs, outputs)
+    energy, linear_combination = self.attention(outputs, padding_mask)
     logits = self.decoder(linear_combination)
     reverse_linear_comb = ReverseLayerF.apply(linear_combination, alpha)
     topic_logprobs = self.topic_decoder(reverse_linear_comb)
@@ -125,7 +160,7 @@ class CNN_Text(nn.Module):
       x = F.max_pool1d(x, x.size(2)).squeeze(2)
       return x
 
-  def forward(self, x, gradreverse=True, alpha=1.0):
+  def forward(self, x, gradreverse=True, alpha=1.0, padding_mask=None):
       x = x.permute(1, 0)
       x = self.embed(x)  # (N, W, D)
 

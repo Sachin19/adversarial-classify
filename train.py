@@ -30,11 +30,11 @@ def make_parser():
                         help='Model name to save')
   parser.add_argument('--topic_loss', type=str, default="ce",
                         help='in [mse|ce]')
-  parser.add_argument('--emsize', type=int, default=300,
+  parser.add_argument('--emsize', type=int, default=32,
                         help='size of word embeddings [Uses pretrained on 50, 100, 200, 300]')
-  parser.add_argument('--hidden', type=int, default=500,
+  parser.add_argument('--hidden', type=int, default=64,
                         help='number of hidden units for the RNN encoder')
-  parser.add_argument('--nlayers', type=int, default=2,
+  parser.add_argument('--nlayers', type=int, default=1,
                         help='number of layers of the RNN encoder')
   parser.add_argument('--num_topics', type=int, default=50,
                         help='Number of Topics')
@@ -54,8 +54,8 @@ def make_parser():
                         help='dropout')
   parser.add_argument('--gradreverse', action='store_false',
                         help='Reverse Gradients if not set')
-  parser.add_argument('--bi', action='store_true',
-                        help='[USE] bidirectional encoder')
+  parser.add_argument('--bi', action='store_false',
+                        help='[DON\'T USE] bidirectional encoder')
   parser.add_argument('--save_output_topics', action='store_true',
                         help='save output topics in file')
   parser.add_argument('--output_topics_save_filename', type=str,
@@ -64,10 +64,10 @@ def make_parser():
                     help='[DONT] use CUDA')
   parser.add_argument('--load', action='store_true',
                     help='Load and Evaluate the model on test data, dont train')
+  parser.add_argument('--write_attention', action='store_true',
+                    help='write attention values to file')
   parser.add_argument('--demote_topics', action='store_true',
                     help='[Demote] topics adversarially while training')
-  parser.add_argument('--fine', action='store_true',
-                    help='use fine grained labels in SST')
 
   parser.add_argument('-kernel-num', type=int, default=100, help='number of each kind of kernel')
   parser.add_argument('-kernel-sizes', type=str, default='3,4,5', help='comma-separated kernel size to use for convolution')
@@ -107,23 +107,37 @@ def update_stats_topics(accuracy, confusion_matrix, logits, y):
   return accuracy + correct, confusion_matrix
 
 
-def train(model, data, optimizer, criterion, args):
+def train(model, data, optimizer, criterion, args, epoch):
   model.train()
   accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
-  accuracy_fromtopics, confusion_matrix_ = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
+  accuracy_fromtopics, confusion_matrix_ = 0, np.zeros((args.num_topics, args.num_topics), dtype=int)
   t = time.time()
   total_loss = 0
   total_topic_loss = 0
+  num_batches = len(data)
   for batch_num, batch in enumerate(data):
+
+    p = (batch_num + epoch * num_batches)/(args.epochs * num_batches)
+    alpha = 2/(1+np.exp(-10*p)) - 1
+    # alpha = 0.0
+    # if epoch >= 3:
+    alpha = args.alpha
     model.zero_grad()
     x, lens = batch.text
     y = batch.label
+    padding_mask = x.ne(1).float()
+
     topics = batch.topics
     if args.model == "FFN":
       logits, _, topic_logprobs = model(topics)
     else:
-      logits, _, topic_logprobs = model(x, gradreverse=args.gradreverse, alpha=args.alpha)
-
+      logits, energy, topic_logprobs = model(x, gradreverse=args.gradreverse, alpha=alpha, padding_mask=padding_mask)
+      if energy is not None:
+        energy = torch.squeeze(energy)
+    # print (x.size())
+    # print (energy.size())
+    # print (energy)
+    # input()
     loss = criterion(logits.view(-1, args.nlabels), y)
     total_loss += float(loss)
 
@@ -159,25 +173,29 @@ def train(model, data, optimizer, criterion, args):
   return total_loss / len(data)
 
 
-def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetopics=False):
+def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetopics=False, itos=None):
   model.eval()
   if writetopics:
     topicfile = open(args.save_dir+"/"+datatype+"_"+args.output_topics_save_filename+".txt","w")
+  if args.write_attention and itos is not None:
+    attention_file = open(args.save_dir+"/"+datatype+"_attention.txt", "w")
   accuracy, confusion_matrix = 0, np.zeros((args.nlabels, args.nlabels), dtype=int)
   t = time.time()
   total_loss = 0
   total_topic_loss = 0
+
   with torch.no_grad():
     for batch_num, batch in enumerate(data):
       # print (len(batch.text))
       x, lens = batch.text
       y = batch.label
+      padding_mask = x.ne(1).float()
       # topics = batch.topics
 
       if args.model == "FFN":
         logits, _, _ = model(topics)
       else:
-        logits, _, topic_logprobs = model(x, gradreverse=args.gradreverse)
+        logits, energy, topic_logprobs = model(x, gradreverse=args.gradreverse, padding_mask=padding_mask)
 
       # if args.demote_topics:
       #   topics = batch.topics
@@ -188,6 +206,14 @@ def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetop
       if writetopics:
         for topiclogprob in topic_logprobs.cpu().data.numpy():
           topicfile.write(" ".join([str(np.exp(t)) for t in topiclogprob])+"\n")
+      if args.write_attention and itos is not None:
+        energy = energy.cpu().data.numpy()
+        for sentence, length, attns in zip(x.cpu().data.numpy(), lens.cpu().data.numpy(), energy):
+          s = ""
+          for wordid, attn in zip(sentence[:length], attns[:length]):
+            s += itos[wordid]+":"+str(attn)+" "
+          print (s)
+          input()
       total_loss += float(criterion(logits.view(-1, args.nlabels), y))
       accuracy, confusion_matrix = update_stats(accuracy, confusion_matrix, logits, y)
       print("[Batch]: {}/{} in {:.5f} seconds".format(
@@ -269,9 +295,10 @@ def main():
                       dropout=args.drop, bidirectional=args.bi, rnn_type=args.rnn_model)
 
     attention_dim = args.hidden if not args.bi else 2*args.hidden
-    attention = Attention(attention_dim, attention_dim, attention_dim)
+    attention = BahdanauAttention(attention_dim, attention_dim)
 
     model = Classifier(embedding, encoder, attention, attention_dim, nlabels, num_topics=args.num_topics)
+
   model.to(device)
 
   criterion = nn.CrossEntropyLoss()
@@ -290,7 +317,7 @@ def main():
       best_valid_loss = None
       best_model = None
       for epoch in range(1, args.epochs + 1):
-        train(model, train_iter, optimizer, criterion, args)
+        train(model, train_iter, optimizer, criterion, args, epoch)
         loss = evaluate(model, val_iter, optimizer, criterion, args)
 
         if not best_valid_loss or loss < best_valid_loss:
@@ -301,7 +328,7 @@ def main():
     except KeyboardInterrupt:
       print("[Ctrl+C] Training stopped!")
 
-  trainloss = evaluate(best_model, train_iter, optimizer, criterion, args, datatype='train', writetopics=args.save_output_topics)
+  trainloss = evaluate(best_model, train_iter, optimizer, criterion, args, datatype='train', writetopics=args.save_output_topics, itos=TEXT.vocab.itos)
   valloss = evaluate(best_model, val_iter, optimizer, criterion, args, datatype='valid', writetopics=args.save_output_topics)
   loss = evaluate(best_model, test_iter, optimizer, criterion, args, datatype='test', writetopics=args.save_output_topics)
   odLoss = evaluate(best_model, outdomain_test_iter, optimizer, criterion, args, datatype="oodtest", writetopics=args.save_output_topics)
