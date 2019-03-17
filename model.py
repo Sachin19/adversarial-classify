@@ -125,9 +125,93 @@ class Classifier(nn.Module):
 
     energy, linear_combination = self.attention(outputs, padding_mask)
     logits = self.decoder(linear_combination)
-    reverse_linear_comb = ReverseLayerF.apply(linear_combination, alpha)
-    topic_logprobs = self.topic_decoder(reverse_linear_comb)
-    return logits, energy, topic_logprobs
+
+    if gradreverse:
+      reverse_linear_comb = ReverseLayerF.apply(linear_combination, alpha)
+      topic_logprobs = self.topic_decoder(reverse_linear_comb)
+    else:
+      topic_logprobs = self.topic_decoder(linear_combination)
+    return logits, energy, topic_logprobs, linear_combination
+
+class Classifier_GANLike(nn.Module):
+  def __init__(self, embedding, encoder, attention, hidden_dim, num_classes=10):
+    super(Classifier_GANLike, self).__init__()
+    # num_classes=2
+    self.embedding = embedding
+    self.encoder = encoder
+    self.attention = attention
+    self.decoder = nn.Linear(hidden_dim, num_classes)
+
+    size = 0
+    for p in self.parameters():
+      size += p.nelement()
+    print('Total param size: {}'.format(size))
+
+  def forward(self, input, padding_mask=None):
+    outputs, hidden = self.encoder(self.embedding(input))
+    if isinstance(hidden, tuple): # LSTM
+      hidden = hidden[1] # take the cell state
+
+    if self.encoder.bidirectional: # need to concat the last 2 hidden layers
+      hidden = torch.cat([hidden[-1], hidden[-2]], dim=1)
+    else:
+      hidden = hidden[-1]
+
+    # max across T?
+    # Other options (work worse on a few tests):
+    # linear_combination, _ = torch.max(outputs, 0)
+    # linear_combination = torch.mean(outputs, 0)
+
+    energy, linear_combination = self.attention(outputs, padding_mask)
+    logits = self.decoder(linear_combination)
+
+    # if gradreverse:
+    #   reverse_linear_comb = ReverseLayerF.apply(linear_combination, alpha)
+    #   topic_logprobs = self.topic_decoder(reverse_linear_comb)
+    # else:
+    #   topic_logprobs = self.topic_decoder(linear_combination)
+    return logits, energy, linear_combination
+
+class Classifier_GANLike_bottleneck(nn.Module): #add a small bottleneck layer in the network
+  def __init__(self, embedding, encoder, attention, hidden_dim, num_classes=10, num_topics=50, bottleneck_dim=50):
+    super(Classifier_GANLike_bottleneck, self).__init__()
+    # num_classes=2
+    self.embedding = embedding
+    self.encoder = encoder
+    self.attention = attention
+    self.bottleneck = nn.Linear(hidden_dim, bottleneck_dim)
+    self.decoder = nn.Linear(bottleneck_dim, num_classes)
+
+    size = 0
+    for p in self.parameters():
+      size += p.nelement()
+    print('Total param size: {}'.format(size))
+
+  def forward(self, input, padding_mask=None):
+    outputs, hidden = self.encoder(self.embedding(input))
+    if isinstance(hidden, tuple): # LSTM
+      hidden = hidden[1] # take the cell state
+
+    if self.encoder.bidirectional: # need to concat the last 2 hidden layers
+      hidden = torch.cat([hidden[-1], hidden[-2]], dim=1)
+    else:
+      hidden = hidden[-1]
+
+    # max across T?
+    # Other options (work worse on a few tests):
+    # linear_combination, _ = torch.max(outputs, 0)
+    # linear_combination = torch.mean(outputs, 0)
+
+    energy, linear_combination = self.attention(outputs, padding_mask)
+    linear_combination_bn = self.bottleneck(linear_combination)
+    logits = self.decoder(linear_combination_bn)
+
+    # if gradreverse:
+    #   reverse_linear_comb = ReverseLayerF.apply(linear_combination, alpha)
+    #   topic_logprobs = self.topic_decoder(reverse_linear_comb)
+    # else:
+    #   topic_logprobs = self.topic_decoder(linear_combination)
+    return logits, energy, linear_combination_bn
 
 
 class CNN_Text(nn.Module):
@@ -187,7 +271,60 @@ class CNN_Text(nn.Module):
         topic_logprobs = self.topic_decoder(reverse_x)
       else:
         topic_logprobs = self.topic_decoder(x)
-      return logit, None, topic_logprobs
+      return logit, None, topic_logprobs, None
+
+class CNN_Text_GANLike(nn.Module):
+
+  def __init__(self, args, num_topics=50):
+      super(CNN_Text_GANLike, self).__init__()
+      self.args = args
+
+      V = args.embed_num
+      D = args.embed_dim
+      C = args.nlabels
+      Ci = 1
+      Co = args.kernel_num
+      Ks = args.kernel_sizes
+
+      self.embed = nn.Embedding(V, D)
+      # self.convs1 = [nn.Conv2d(Ci, Co, (K, D)) for K in Ks]
+      self.convs1 = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
+      '''
+      self.conv13 = nn.Conv2d(Ci, Co, (3, D))
+      self.conv14 = nn.Conv2d(Ci, Co, (4, D))
+      self.conv15 = nn.Conv2d(Ci, Co, (5, D))
+      '''
+      self.dropout = nn.Dropout(args.drop)
+      self.fc1 = nn.Linear(len(Ks)*Co, C)
+
+  def conv_and_pool(self, x, conv):
+      x = F.relu(conv(x)).squeeze(3)  # (N, Co, W)
+      x = F.max_pool1d(x, x.size(2)).squeeze(2)
+      return x
+
+  def forward(self, x, gradreverse=True, alpha=1.0, padding_mask=None):
+      x = x.permute(1, 0)
+      x = self.embed(x)  # (N, W, D)
+
+      x = Variable(x)
+
+      x = x.unsqueeze(1)  # (N, Ci, W, D)
+
+      x = [F.relu(conv(x)).squeeze(3) for conv in self.convs1]  # [(N, Co, W), ...]*len(Ks)
+
+      x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]  # [(N, Co), ...]*len(Ks)
+
+      x = torch.cat(x, 1)
+
+      '''
+      x1 = self.conv_and_pool(x,self.conv13) #(N,Co)
+      x2 = self.conv_and_pool(x,self.conv14) #(N,Co)
+      x3 = self.conv_and_pool(x,self.conv15) #(N,Co)
+      x = torch.cat((x1, x2, x3), 1) # (N,len(Ks)*Co)
+      '''
+      x = self.dropout(x)  # (N, len(Ks)*Co)
+      logit = self.fc1(x)  # (N, C)
+      return logit, None, x
 
 class FFN_BOW_Text(nn.Module):
 
