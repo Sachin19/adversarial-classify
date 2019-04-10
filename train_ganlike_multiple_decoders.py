@@ -338,11 +338,11 @@ def evaluate(model, data, criterion, args, datatype='Valid', writetopics=False, 
         for sentence, length, attns, ll, mi, index in zip(x.permute(1,0).cpu().data.numpy(), lens.cpu().data.numpy(), energy, y.cpu().data.numpy(), max_ind.cpu().data.numpy(), indices):
           s = ""
           for wordid, attn in zip(sentence[:length], attns[:length]):
-            s += unicode(itos[wordid])+":"+unicode(attn)+" "
-          gold = unicode(litos[ll])
-          pred = unicode(litos[mi])
+            s += str(itos[wordid])+":"+str(attn)+" "
+          gold = str(litos[ll])
+          pred = str(litos[mi])
           # print (index)
-          index = unicode(str(index))
+          index = str(index)
           z = s+"\t"+gold+"\t"+pred+"\t"+index+"\n"
           attention_file.write(z)
       bloss = criterion(logits.view(-1, args.nlabels), y)
@@ -466,7 +466,7 @@ def main():
       for epoch in range(1, args.pretrain_epochs+1):
         pretrain_classifier(classifier_model, train_iter, classify_optim, classify_criterion, args, epoch)
         loss = evaluate(classifier_model, val_iter, classify_criterion, args)
-        oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest")
+        #oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest")
 
         if not best_valid_loss or loss < best_valid_loss:
           best_valid_loss = loss
@@ -490,7 +490,7 @@ def main():
         for c_step in range(1, args.c_steps+1):
           train_classifier(classifier_model, topic_decoder, train_iter, classify_optim, classify_criterion, topic_criterion, args, epoch, args.c_steps)
           loss = evaluate(classifier_model, val_iter, classify_criterion, args)
-          oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest")
+          #oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest")
 
         #creating a new instance of a decoder
         attention_dim = args.hidden if not args.bi else 2*args.hidden
@@ -529,9 +529,9 @@ def main():
     for oodname, oodtest_iter in zip(oodnames, outdomain_test_iter):
       oodLoss = evaluate(best_model, oodtest_iter, classify_criterion, args, datatype=oodname+"_bestmodel", writetopics=args.save_output_topics)
       oodLoss = evaluate(classifier_model, oodtest_iter, classify_criterion, args, datatype=oodname+"_latest", writetopics=args.save_output_topics)
-  else:
-    oodLoss = evaluate(best_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest_bestmodel", writetopics=args.save_output_topics, itos=TEXT.vocab.itos, litos=LABEL.vocab.itos)
-    oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest_latest", writetopics=args.save_output_topics)
+  # else:
+  #   oodLoss = evaluate(best_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest_bestmodel", writetopics=args.save_output_topics, itos=TEXT.vocab.itos, litos=LABEL.vocab.itos)
+  #   oodLoss = evaluate(classifier_model, outdomain_test_iter[0], classify_criterion, args, datatype="oodtest_latest", writetopics=args.save_output_topics)
 
 if __name__ == '__main__':
   main()

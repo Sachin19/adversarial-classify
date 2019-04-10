@@ -257,11 +257,11 @@ def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetop
         for sentence, length, attns, ll, mi, index in zip(x.permute(1,0).cpu().data.numpy(), lens.cpu().data.numpy(), energy, y.cpu().data.numpy(), max_ind.cpu().data.numpy(), indices):
           s = ""
           for wordid, attn in zip(sentence[:length], attns[:length]):
-            s += unicode(itos[wordid])+":"+unicode(attn)+" "
-          gold = unicode(litos[ll])
-          pred = unicode(litos[mi])
+            s += str(itos[wordid])+":"+str(attn)+" "
+          gold = str(litos[ll])
+          pred = str(litos[mi])
           # print (index)
-          index = unicode(str(index))
+          index = str(str(index))
           z = s+"\t"+gold+"\t"+pred+"\t"+index+"\n"
           attention_file.write(z)
 
@@ -270,11 +270,11 @@ def evaluate(model, data, optimizer, criterion, args, datatype='Valid', writetop
         for sentence, length, ll, mi, index in zip(x.permute(1,0).cpu().data.numpy(), lens.cpu().data.numpy(), y.cpu().data.numpy(), max_ind.cpu().data.numpy(), indices):
           s = ""
           for wordid in sentence[:length]:
-            s += unicode(itos[wordid])+" "
-          gold = unicode(litos[ll])
-          pred = unicode(litos[mi])
+            s += str(itos[wordid])+" "
+          gold = str(litos[ll])
+          pred = str(litos[mi])
           # print (index)
-          index = unicode(str(index))
+          index = str(index)
           z = s+"\t"+gold+"\t"+pred+"\t"+index+"\n"
           attention_file.write(z)
 
