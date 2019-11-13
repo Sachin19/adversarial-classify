@@ -1,7 +1,8 @@
-Use run.sh to run the code
+This repository contains the code for the paper
 
-model.py contains two classifier modules, one has an RNN encoder while other uses a CNN encoder. Look at train.py to setup options for both. 
+> [Topics to Avoid: Demoting Latent Confounds in Text Classification](https://arxiv.org/abs/1909.00453) _Sachin Kumar_ , _Shuly Wintner_, _Noah Smith_, _Yulia Tsvetkov_
 
-datasets.py contains information about how the paths should be specified. 
-train file contains the following tab separated info: <text> <label> <username> <space separated topic distribution - 50 scalars>
-dev and test file contain the same information except for the topic distribution.
+# Dependencies
+
+* __Pytorch 0.3.0__
+* Python >= 3.6
